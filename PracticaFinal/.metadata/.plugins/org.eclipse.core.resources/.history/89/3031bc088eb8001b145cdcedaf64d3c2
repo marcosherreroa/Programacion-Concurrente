@@ -1,0 +1,209 @@
+package Cliente;
+
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.net.InetAddress;
+import java.net.Socket;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Scanner;
+import java.util.concurrent.Semaphore;
+
+import Concurrencia.*;
+import Mensaje.*;
+
+
+
+public class Cliente {
+	private final String id;
+	private final Scanner stdinput;
+	private volatile boolean active;
+	private volatile int recepcionesEnCurso;
+	private final InetAddress dirIP;
+	private final InetAddress dirIPServidor;
+	private final Socket socketServidor;
+	private final ObjectOutputStream fout;
+	
+	private final MonitorBufferMensajes bufferMensajes; // buffer en el que los procesos OS y Receptor depositan mensajes 
+	                                                    // para el cliente que este no espera de manera síncrona
+	                                                    //(por ejemplo, la notificación de que se ha descargado un fichero)
+
+	private final LockTicket lockFout; //para acceder al flujo con el servidor en exclusion mutua
+	private final Semaphore mutRecepciones; //para incrementar/decrementar recepciones en curso en exclusión mutua
+	private final Semaphore esperaOyente; // para sincronizarse con el oyente servidor
+	
+	public Cliente(String id,Scanner stdinput) throws IOException {
+		this.id = id;
+		this.stdinput = stdinput;
+		this.active = true;
+		this.recepcionesEnCurso = 0;
+	
+		this.dirIP = InetAddress.getLocalHost();
+		this.dirIPServidor = InetAddress.getByName("10.8.65.90");//192.168.1.90
+		
+		this.socketServidor = new Socket(dirIPServidor, 500);
+		this.fout = new ObjectOutputStream(socketServidor.getOutputStream());
+		
+		this.bufferMensajes = new MonitorBufferMensajes(10);
+		
+		this.lockFout = new LockTicket(2); // El proceso 1 es el cliente y el 2 es el Oyente Servidor
+		this.mutRecepciones = new Semaphore(1,true);
+		this.esperaOyente = new Semaphore(0,true); 
+		
+	}
+	
+	public String getId() {
+		return id;
+	}
+	
+	public InetAddress getDirIP() {
+		return dirIP;
+	}
+	
+	public boolean getActive() {
+		return active;
+	}
+	
+	public void setActive(boolean active) {
+		this.active = active;
+	}
+	
+	public void decrementRecepcionesEnCurso() throws InterruptedException {
+		mutRecepciones.acquire();
+		--recepcionesEnCurso;
+		mutRecepciones.release();
+	}
+	
+	public void depositarMensaje(String mensaje) throws InterruptedException {
+		bufferMensajes.depositarMensaje(mensaje);
+	}
+	
+	public Semaphore getMutRecepciones() {
+		return mutRecepciones;
+	}
+	
+	public void execute() throws IOException, InterruptedException {
+		ObjectInputStream fin = new ObjectInputStream(socketServidor.getInputStream());
+		
+		OyenteServidor os = new OyenteServidor(this, fin,fout, lockFout, esperaOyente);
+		os.start();
+		
+		System.out.print("Introduzca los nombres de los ficheros a compartir: ");
+		String linea = stdinput.nextLine();
+		String [] nombresFicheros = linea.split(" ");
+		List<String> ficheros = new ArrayList<String>();
+		for(String s: nombresFicheros) {
+			ficheros.add(s);
+		}
+		
+		//Envio mensaje conexión
+		lockFout.takeLock(1);
+		fout.writeObject(new MensajeConexion(id,"Servidor",ficheros));
+		lockFout.releaseLock(1);
+		
+		//Esperar a recibir la confirmación de conexión
+		esperaOyente.acquire();
+		
+		while(active) {
+			
+			//En cada iteración del cliente,  mostrar el menú, mostramos los mensajes que hayan quedado en el buffer
+	
+			bufferMensajes.mostrarMensajes();
+			
+			//Mostramos el menú
+			
+			System.out.println();
+			System.out.println("=====================");
+			System.out.println("MENU");
+			System.out.println("=====================");
+			System.out.println();
+			
+			System.out.println("¿Qué desea hacer?");
+			System.out.println("0: Consultar lista de usuarios");
+			System.out.println("1: Pedir fichero");
+			System.out.println("2: Salir");
+			System.out.println("Introduzca opcion [0-2] : ");
+			
+			//El usuario selecciona una opción
+			
+			int option = stdinput.nextInt();
+			
+			switch(option) {
+			case 0:
+				//Enviar mensaje lista usuarios
+				lockFout.takeLock(1);
+				fout.writeObject(new MensajeListaUsuarios(id,"Servidor"));
+				lockFout.releaseLock(1);
+				
+				//Esperar a recibir la lista de usuarios
+				esperaOyente.acquire();
+				
+				break;
+				
+			case 1:
+				//Pedir al usuario el nombre del fichero
+				System.out.println("Introduzca el nombre del fichero buscado:");
+			    String nombreFichero = stdinput.next();
+			    
+			    //Enviar mensaje pedir fichero
+			    lockFout.takeLock(1);
+				fout.writeObject(new MensajePedirFichero(id,"Servidor",nombreFichero));
+				lockFout.releaseLock(1);
+				
+				mutRecepciones.acquire();
+				++recepcionesEnCurso;
+				mutRecepciones.release();
+				
+				
+				System.out.println("\nGestionando la descarga del fichero "+nombreFichero+"\n");
+				
+				break;
+				
+			case 2:
+				
+				if(recepcionesEnCurso > 0) {
+					System.out.println("\nNo puedes salir hasta que recibas las "+recepcionesEnCurso+" recepciones pendientes\n");
+				}
+				
+				else {
+					//Antes de salir mostramos los mensajes pendientes
+					bufferMensajes.mostrarMensajes();
+					
+					//Envio mensaje cierre de conexion
+					lockFout.takeLock(1);
+					fout.writeObject(new MensajeCerrarConexion(id,"Servidor"));
+					lockFout.releaseLock(1);
+		
+					//Esperar a recibir la confirmacion de cierre de conexion
+					esperaOyente.acquire();
+				}
+					
+				break;
+			}
+		}
+		
+		//Cerrar canal
+		socketServidor.close();
+	}
+	
+    public static void main(String[] args) {
+    	System.out.print("Introduzca su nombre de usuario: ");
+    	Scanner stdinput = new Scanner(System.in);
+    	String id = stdinput.nextLine();
+    
+		try {
+			Cliente cliente = new Cliente(id,stdinput);
+			cliente.execute();
+			
+		} catch (IOException e) {
+			System.out.println("Cliente "+id+" : Error de IO");
+			e.printStackTrace();
+		} catch (InterruptedException e) {
+			System.out.println("Cliente "+id+" : Thread interrumpido cuando esperaba en un semáforo");
+			e.printStackTrace();
+		}
+    	
+    	stdinput.close();
+    }
+}

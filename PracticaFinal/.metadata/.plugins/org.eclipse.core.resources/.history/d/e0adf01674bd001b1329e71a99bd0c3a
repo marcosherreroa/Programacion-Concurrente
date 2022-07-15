@@ -1,0 +1,10 @@
+package concurrencia;
+
+
+public class VolatileInt {
+    public volatile int e;
+    
+    public VolatileInt(int e) {
+    	this.e = e;
+    }
+}

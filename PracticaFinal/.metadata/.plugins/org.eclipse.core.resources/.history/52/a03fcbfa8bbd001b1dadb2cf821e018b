@@ -1,0 +1,20 @@
+package concurrencia;
+
+import java.io.IOException;
+import java.io.ObjectOutputStream;
+
+public class MonitorFlujoSalida {
+	private volatile ObjectOutputStream fout;
+    
+    public MonitorFlujoSalida(ObjectOutputStream fout) {
+    	this.fout = fout;
+    }
+    
+    synchronized public void writeObject(Object o) throws IOException {
+	     fout.writeObject(o);
+    }
+    
+    synchronized public void close() throws IOException {
+    	fout.close();
+    }
+}
